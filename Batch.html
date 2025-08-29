@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>Gemini Batch Wizard</title>
+  <style>
+    body { font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; padding:16px; width:400px; }
+    label { display:block; margin:10px 0 4px; font-weight:600; }
+    input, textarea, select { width:100%; padding:8px; box-sizing:border-box; }
+    textarea { min-height: 80px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .row { display:flex; gap:8px; }
+    .row > div { flex:1; }
+    button { margin-top: 12px; padding:8px 12px; cursor:pointer; }
+    small { color:#555; display:block; margin-top:8px; }
+    .status { margin-top:10px; min-height:1.25em; }
+    .ok { color:green; }
+    .err { color:#c62828; }
+  </style>
+</head>
+<body>
+  <h2>Gemini Batch Wizard</h2>
+
+  <label for="sheet">Sheet name</label>
+  <input id="sheet" placeholder="e.g. Research" />
+
+  <label for="inRange">Input range (rows to process)</label>
+  <input id="inRange" placeholder="e.g. A2:A101" />
+
+  <label for="outStart">Output start cell</label>
+  <input id="outStart" placeholder="e.g. B2" />
+
+  <label for="prompt">Prompt (each row is passed as Context)</label>
+  <textarea id="prompt" placeholder="Research the company and return fields in the schema."></textarea>
+
+  <label for="keys">Keys (comma separated) — order becomes output columns</label>
+  <input id="keys" placeholder="summary, website, founder, funding, competitors" />
+
+  <label for="schema">JSON Schema (optional; overrides keys if provided)</label>
+  <textarea id="schema" placeholder='{"type":"object","properties":{"summary":{"type":"string"},"website":{"type":"string"},"founder":{"type":"string"},"funding":{"type":"string"},"competitors":{"type":"string"}},"required":["summary","website"]}'></textarea>
+
+  <div class="row">
+    <div>
+      <label for="model">Model</label>
+      <select id="model">
+        <option>gemini-2.5-flash</option>
+        <option>gemini-2.5-pro</option>
+      </select>
+    </div>
+    <div>
+      <label for="temp">Temp</label>
+      <input id="temp" type="number" step="0.1" value="0.2" min="0" max="1" />
+    </div>
+    <div>
+      <label for="tokens">Max tokens</label>
+      <input id="tokens" type="number" value="1200" min="1" />
+    </div>
+  </div>
+
+  <label>
+    <input id="search" type="checkbox" checked aria-describedby="search-help">
+    Enable Google Search grounding
+  </label>
+  <small id="search-help">For grounded answers with sources.</small>
+
+  <div class="row" aria-label="Scheduling">
+    <div>
+      <label for="schedule">Schedule</label>
+      <select id="schedule">
+        <option value="none">None</option>
+        <option value="monthly" selected>Monthly</option>
+      </select>
+    </div>
+    <div>
+      <label for="hour">Hour (local)</label>
+      <input id="hour" type="number" min="0" max="23" value="9" />
+    </div>
+  </div>
+
+  <div class="row" aria-label="Actions">
+    <button id="saveBtn" type="button">Save</button>
+    <button id="runBtn" type="button">Run now</button>
+    <button id="schedBtn" type="button">Create/Update monthly trigger</button>
+  </div>
+
+  <div id="status" class="status" role="status" aria-live="polite"></div>
+
+  <small>Tip: Use <code>=GEMINI_BATCH_TABLE()</code> for ad-hoc one-call-per-row. The wizard pastes values (no recompute on open).</small>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    const statusEl = $('status');
+    const saveBtn = $('saveBtn'), runBtn = $('runBtn'), schedBtn = $('schedBtn');
+
+    function setStatus(msg, ok=false) {
+      statusEl.textContent = msg || '';
+      statusEl.className = 'status ' + (ok ? 'ok' : msg ? 'err' : '');
+    }
+
+    function validate() {
+      const ok = $('temp').reportValidity() &&
+                 $('tokens').reportValidity() &&
+                 $('hour').reportValidity();
+      if (!ok) return false;
+
+      if (!$('sheet').value.trim() ||
+          !$('inRange').value.trim() ||
+          !$('outStart').value.trim() ||
+          !$('prompt').value.trim()) {
+        setStatus('Please fill Sheet, Input range, Output start, and Prompt.');
+        return false;
+      }
+      return true;
+    }
+
+    function payload() {
+      return {
+        sheetName: $('sheet').value.trim(),
+        inputRange: $('inRange').value.trim(),
+        outputStart: $('outStart').value.trim(),
+        prompt: $('prompt').value,
+        keysCsv: $('keys').value,
+        schemaJson: $('schema').value,
+        model: $('model').value,
+        temperature: Number($('temp').value || 0.2),
+        maxOutputTokens: Number($('tokens').value || 1200),
+        search: $('search').checked,
+        schedule: $('schedule').value,
+        hour: Number($('hour').value || 9)
+      };
+    }
+
+    function wrap(gsCall) {
+      return new Promise((res, rej) => gsCall.withSuccessHandler(res).withFailureHandler(rej));
+    }
+
+    async function doSave() {
+      if (!validate()) return;
+      setBusy(true);
+      setStatus('Saving…');
+      try {
+        await wrap(google.script.run.saveBatchConfig_(payload()));
+        setStatus('✅ Saved.', true);
+      } catch (e) {
+        setStatus('❌ ' + (e && e.message ? e.message : e));
+      } finally {
+        setBusy(false);
+        setTimeout(() => setStatus(''), 2500);
+      }
+    }
+
+    async function runNow() {
+      if (!validate()) return;
+      setBusy(true);
+      setStatus('Running batch… This may take a while.');
+      try {
+        await wrap(google.script.run.saveBatchConfig_(payload()));
+        await wrap(google.script.run.runBatchNow_());
+        setStatus('✅ Batch complete.', true);
+      } catch (e) {
+        setStatus('❌ ' + (e && e.message ? e.message : e));
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function schedule() {
+      if (!validate()) return;
+      setBusy(true);
+      setStatus('Creating/updating monthly trigger…');
+      try {
+        await wrap(google.script.run.saveBatchConfig_(payload()));
+        await wrap(google.script.run.ensureMonthlyTrigger_());
+        setStatus('✅ Monthly trigger set.', true);
+      } catch (e) {
+        setStatus('❌ ' + (e && e.message ? e.message : e));
+      } finally {
+        setBusy(false);
+        setTimeout(() => setStatus(''), 2500);
+      }
+    }
+
+    function setBusy(b) {
+      saveBtn.disabled = runBtn.disabled = schedBtn.disabled = b;
+    }
+
+    saveBtn.addEventListener('click', doSave);
+    runBtn.addEventListener('click', runNow);
+    schedBtn.addEventListener('click', schedule);
+  </script>
+</body>
+</html>
